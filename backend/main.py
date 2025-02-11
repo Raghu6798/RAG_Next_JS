@@ -1,5 +1,6 @@
 import os
 from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import Depends
 from fastapi.middleware.cors import CORSMiddleware
 from langchain_groq import ChatGroq
 from langchain.vectorstores import FAISS
@@ -7,7 +8,6 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain.prompts import ChatPromptTemplate,MessagesPlaceholder
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
-from langchain_community.chat_message_histories import ChatMessageHistory
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_neo4j import Neo4jChatMessageHistory,Neo4jGraph
 from langchain_core.output_parsers import StrOutputParser
@@ -17,7 +17,7 @@ from loguru import logger
 import tempfile
 from uuid import uuid4
 
-SESSION_ID = str(uuid4())
+SESSION_ID =  str(uuid4())
 warnings.filterwarnings('ignore')
 logger.add("logs.log", rotation="10 MB", level="INFO", backtrace=True, diagnose=True)
 load_dotenv()
@@ -49,8 +49,7 @@ graph = Neo4jGraph(
     password=os.getenv("NEO4J_PASSWORD")
 )
 
-def get_memory(session_id):
-    return Neo4jChatMessageHistory(session_id=session_id, graph=graph)
+
 # Initialize Groq's model
 Deepseek = ChatGroq(
     model="deepseek-r1-distill-llama-70b",
@@ -76,11 +75,12 @@ prompt_template = ChatPromptTemplate.from_messages([
     ("human", "{question}")
 ])
 
-
 @app.get("/")
 def greet():
     return {'greet':'Hey what is up , welcome to my server'}
 
+def get_memory(session_id):
+    return Neo4jChatMessageHistory(session_id=session_id, graph=graph)
 
 @app.post("/upload")
 async def upload_pdf(file: UploadFile = File(...)):
@@ -117,8 +117,7 @@ async def chat(message: str):
         retriever = vectorstore.as_retriever()
         retrieved_documents = retriever.get_relevant_documents(message)
         context = "\n".join([doc.page_content for doc in retrieved_documents])
-        prompt = prompt_template
-        retrieval_chain = prompt | Deepseek | StrOutputParser() 
+        retrieval_chain = prompt_template | Deepseek | StrOutputParser() 
         chat_with_message_history = RunnableWithMessageHistory(
             retrieval_chain,
             get_memory,
