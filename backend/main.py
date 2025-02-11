@@ -4,15 +4,22 @@ from fastapi.middleware.cors import CORSMiddleware
 from langchain_groq import ChatGroq
 from langchain.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain.prompts import ChatPromptTemplate
+from langchain.prompts import ChatPromptTemplate,MessagesPlaceholder
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader
+from langchain_community.chat_message_histories import ChatMessageHistory
+from langchain_core.runnables.history import RunnableWithMessageHistory
+from langchain_neo4j import Neo4jChatMessageHistory,Neo4jGraph
+from langchain_core.output_parsers import StrOutputParser
 from dotenv import load_dotenv
 import warnings
+from loguru import logger
 import tempfile
+from uuid import uuid4
 
-
+SESSION_ID = str(uuid4())
 warnings.filterwarnings('ignore')
+logger.add("logs.log", rotation="10 MB", level="INFO", backtrace=True, diagnose=True)
 load_dotenv()
 
 app = FastAPI()
@@ -20,7 +27,7 @@ app = FastAPI()
 # Enable CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -36,6 +43,14 @@ embeddings = HuggingFaceEmbeddings(
     encode_kwargs=encode_kwargs
 )
 
+graph = Neo4jGraph(
+    url=os.getenv("NEO4J_URI"),
+    username=os.getenv("NEO4J_USERNAME"),
+    password=os.getenv("NEO4J_PASSWORD")
+)
+
+def get_memory(session_id):
+    return Neo4jChatMessageHistory(session_id=session_id, graph=graph)
 # Initialize Groq's model
 Deepseek = ChatGroq(
     model="deepseek-r1-distill-llama-70b",
@@ -57,6 +72,7 @@ prompt_template = ChatPromptTemplate.from_messages([
         If the answer cannot be found directly, you should clarify this and provide relevant context or related information if applicable.
         Focus on uncovering critical information, whether it's specific facts, summaries, or hidden insights within the document.
     """),
+    MessagesPlaceholder(variable_name="chat_history"),
     ("human", "{question}")
 ])
 
@@ -98,12 +114,28 @@ async def chat(message: str):
         raise HTTPException(status_code=400, detail="Please upload a PDF first")
 
     try:
-        docs = vectorstore.similarity_search(message, k=3)
-        context = "\n".join([doc.page_content for doc in docs])
-        
-        prompt = prompt_template.format(context=context, question=message)
-        response = await Deepseek.ainvoke(prompt)
-        
-        return {"response": response.content}
+        retriever = vectorstore.as_retriever()
+        retrieved_documents = retriever.get_relevant_documents(message)
+        context = "\n".join([doc.page_content for doc in retrieved_documents])
+        prompt = prompt_template
+        retrieval_chain = prompt | Deepseek | StrOutputParser() 
+        chat_with_message_history = RunnableWithMessageHistory(
+            retrieval_chain,
+            get_memory,
+            input_messages_key="question",
+            history_messages_key="chat_history"
+        )
+        response = chat_with_message_history.invoke(
+        {
+            "context": context,
+            "question": message,
+            
+        }, 
+        config={
+            "configurable": {"session_id": SESSION_ID}
+        }
+    )
+        return {"response": response}
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error generating response: {str(e)}")
